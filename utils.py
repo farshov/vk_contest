@@ -29,9 +29,10 @@ class EmbeddingFastText(nn.Module):
 
 class CommentsDataset(Dataset):
 
-    def __init__(self, sentences, targets):
+    def __init__(self, sentences, targets, lenghts):
         self.sent = sentences
         self.targets = targets
+        self.lengths = lenghts
 
     def __len__(self):
         return len(self.sent)
@@ -40,6 +41,6 @@ class CommentsDataset(Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        sample = (self.sent[idx], self.targets[idx])
+        sample = (self.sent[idx], self.targets[idx], self.lengths[idx])
 
         return sample
