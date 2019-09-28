@@ -1,127 +1,55 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-import torch.optim.lr_scheduler as sched
-import torch.utils.data as data
+import torch.utils.data.DataLoader as DataLoader
+import numpy as np
 
-from collections import OrderedDict
 from tqdm import tqdm
-
-from utils import CommentsDataset
-
-
-def train(sent_train, targets_train, len_train, sent_dev, targets_dev, len_dev, model,
-          device, batch_size=64, random_state=42, num_epochs=100):
-
-    step = 0
-    model = model.to(device)
-    model.train()
-
-    optimizer = optim.Adam(model.parameters())
-    lr_politic = lambda epoch: epoch * 0.8
-    scheduler = sched.LambdaLR(optimizer, lr_politic)  # Constant LR
-
-    train_dataset = CommentsDataset(sent_train, targets_train, len_train)
-
-    train_loader = data.DataLoader(train_dataset,
-                                   batch_size=batch_size,
-                                   shuffle=True,
-                                   num_workers=4)
-    dev_dataset = CommentsDataset(sent_dev, targets_dev, len_dev)
-
-    dev_loader = data.DataLoader(dev_dataset,
-                                 batch_size=batch_size,
-                                 shuffle=False,
-                                 num_workers=4)
-
-    steps_till_eval = len(train_dataset) // 100
-    epoch = step // len(train_dataset)
-    while epoch != num_epochs:
-        epoch += 1
-        print(f'Starting epoch {epoch}...')
-        with torch.enable_grad(), \
-                tqdm(total=len(train_loader.dataset)) as progress_bar:
-
-            for X, y, lenghts in train_loader:
-
-                X = X.to(device)
-                y = y.to(device)
-                optimizer.zero_grad()
-
-                output = model(X, lenghts)
-                loss = torch.tensor(0).to(output)
-                for i in range(output.shape[1]):
-                    cur_out = output[:, i].view(-1, 1)
-                    cur_out = torch.cat((torch.zeros_like(cur_out)-cur_out, cur_out), dim=1)
-                    loss += F.nll_loss(cur_out, y[:, i])
-                loss_val = loss.item()
-
-                # Backward
-                loss.backward()
-                optimizer.step()
-                scheduler.step(step // batch_size)
-
-                # Log info
-                step += batch_size
-                progress_bar.update(batch_size)
-                # if not step % 2048:
-                progress_bar.set_postfix(epoch=epoch,
-                                          NLL=loss_val)
-
-                steps_till_eval -= batch_size
-                # if steps_till_eval <= 0:
-                #     steps_till_eval = len(train_dataset) // 100
-                #
-                #     results, pred_dict = evaluate(model, dev_loader, device, batch_size)
-                #
-                #     # Log to console
-                #     results_str = ', '.join(f'{k}: {v:05.2f}' for k, v in results.items())
-    return model
+import time
+from utils import sigmoid
 
 
-def evaluate(model, data_loader, device, batch_size):
+def train(model, train, test, loss_fn, output_dim,
+          lr=0.001, batch_size=512, n_epochs=4):
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    model.eval()
-    pred_dict = {}
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: 0.6 ** epoch)
 
-    with torch.no_grad(), \
-            tqdm(total=len(data_loader.dataset)) as progress_bar:
-        for X, y in data_loader:
-            X = X.to(device)
-            y = y.to(device)
+    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test, batch_size=batch_size, shuffle=False)
 
-            output = model(X)
-            loss = torch.tensor(0)
-            for i in range(output.shape[1]):
-                cur_out = output[:, i]
-                cur_out = torch.cat((torch.zeros_like(cur_out) - cur_out, cur_out), dim=1)
-                loss += F.nll_loss(cur_out, y[:, i])
+    for epoch in range(n_epochs):
+        print('epoch:', epoch)
+        start_time = time.time()
 
+        scheduler.step()
 
-            # # Get F1 and EM scores
-            # p1, p2 = log_p1.exp(), log_p2.exp()
-            # starts, ends = util.discretize(p1, p2, max_len, use_squad_v2)
-            #
-            # # Log info
-            # progress_bar.update(batch_size)
-            # progress_bar.set_postfix(NLL=nll_meter.avg)
-            #
-            # preds, _ = util.convert_tokens(gold_dict,
-            #                                ids.tolist(),
-            #                                starts.tolist(),
-            #                                ends.tolist(),
-            #                                use_squad_v2)
-            # pred_dict.update(preds)
+        model.train()
+        avg_loss = 0.
 
-    model.train()
+        for data in tqdm(train_loader, disable=False):
+            x_batch = data[:-1]
+            y_batch = data[-1]
 
-    # results = util.eval_dicts(gold_dict, pred_dict, use_squad_v2)
-    results_list = [('NLL', nll_meter.avg),
-                    ('F1', results['F1']),
-                    ('EM', results['EM'])]
-    # if use_squad_v2:
-    #     results_list.append(('AvNA', results['AvNA']))
-    results = OrderedDict(results_list)
+            y_pred = model(*x_batch)
+            loss = loss_fn(y_pred, y_batch)
 
-    return results, pred_dict
+            optimizer.zero_grad()
+            loss.backward()
+
+            optimizer.step()
+            avg_loss += loss.item() / len(train_loader)
+
+        model.eval()
+        test_preds = np.zeros((len(test), output_dim))
+
+        for i, x_batch in enumerate(test_loader):
+            y_pred = sigmoid(model(*x_batch).detach().cpu().numpy())
+
+            test_preds[i * batch_size:(i + 1) * batch_size, :] = y_pred
+
+        elapsed_time = time.time() - start_time
+        print('Epoch {}/{} \t loss={:.4f} \t time={:.2f}s'.format(
+            epoch + 1, n_epochs, avg_loss, elapsed_time))
+
+    return test_preds
